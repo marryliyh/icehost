@@ -45,8 +45,7 @@ def run():
         return
 
     with sync_playwright() as p:
-        # 核心修改 1：在启动参数中加入 --disable-blink-features=AutomationControlled
-        # 彻底抹除 Chromium 浏览器的自动化特征
+        # 启用过检测参数，抹除自动化特征
         browser = p.chromium.launch(
             headless=True,
             args=[
@@ -61,25 +60,22 @@ def run():
             viewport={"width": 1280, "height": 720}
         )
 
-        # 核心修改 2：向页面注入高权限过检测脚本，将 navigator.webdriver 强制伪装为 undefined（真实人类浏览器）
+        # 隐藏自动化控制指纹
         context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
         try:
             raw_data = json.loads(ICEHOST_COOKIES)
             cookies_to_add = []
-            local_storage_to_add = {}
 
+            # 智能兼容格式：只提取 Cookie，放弃对 Pterodactyl (翼龙) 注入 LocalStorage
             if isinstance(raw_data, list):
-                print("检测到纯 Cookie 格式数据...")
                 cookies_to_add = raw_data
             elif isinstance(raw_data, dict):
-                print("检测到合并格式数据...")
                 cookies_to_add = raw_data.get("cookies", [])
-                local_storage_to_add = raw_data.get("localStorage", {})
             else:
                 raise ValueError("未知的数据格式")
 
-            # 1. 注入并解码 Cookies
+            # 1. 精准注入并进行 URL 解码
             formatted_cookies = []
             for c in cookies_to_add:
                 raw_value = c["value"]
@@ -108,18 +104,7 @@ def run():
                 formatted_cookies.append(fc)
             
             context.add_cookies(formatted_cookies)
-            print("Cookie 注入并解码成功！")
-
-            # 2. 注入 LocalStorage
-            if local_storage_to_add:
-                init_script = ""
-                for k, v in local_storage_to_add.items():
-                    escaped_k = k.replace('\\', '\\\\').replace("'", "\\'")
-                    escaped_v = v.replace('\\', '\\\\').replace("'", "\\'")
-                    init_script += f"window.localStorage.setItem('{escaped_k}', '{escaped_v}');\n"
-                
-                context.add_init_script(init_script)
-                print("LocalStorage 注入设置成功！")
+            print("Cookie 注入并解码成功！已跳过 LocalStorage 注入以避免 React 状态冲突。")
 
         except Exception as e:
             print(f"凭证解析/注入失败: {e}")
@@ -137,13 +122,13 @@ def run():
 
         # 判断登录状态
         if "login" in page.url or page.locator("input[type='email']").first.is_visible():
-            msg = "❌ <b>IceHost 登录失效！</b>\n请在浏览器重新提取并更新 ICEHOST_COOKIES。"
+            msg = "❌ <b>IceHost 登录失效！</b>\n请重新用控制台脚本导出凭证并更新 ICEHOST_COOKIES。"
             print(msg)
             send_tg_notification(msg, "icehost_debug_screenshot.png")
             browser.close()
             return
 
-        # 3. 核心逻辑：自动检测是否已经达到了 6 小时限制（波兰语特征词）
+        # 3. 检测是否已经达到了 6 小时限制（波兰语特征词）
         page_text = page.locator("body").text_content() or ""
         if "Nie możesz przedłużyć" in page_text or "niedawno" in page_text:
             print("检测到限制提示：当前服务器已续期满6小时上限。结束本次运行。")
