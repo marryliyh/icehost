@@ -20,6 +20,10 @@ jobs:
           pip install playwright requests
           playwright install chromium
 
+      # ⚡ 核心新增：在运行脚本前，一键启动全局 Cloudflare WARP 代理，完美绕过 IP 阻断
+      - name: Set up WARP
+        uses: fscarmen/warp-on-actions@v1.1
+
       - name: Run check script
         env:
           ICEHOST_SERVER_URL: ${{ secrets.ICEHOST_SERVER_URL }}
