@@ -52,7 +52,7 @@ def send_tg_notification(message, photo_path=None):
             print(f"发送 TG 截图异常: {e}")
 
 def check_is_successfully_loaded(page):
-    """100% 确认是否真正进入了控制台（寻找翼龙面板独有元素）"""
+    """通过检测控制面板独有的元素（如波兰语的控制台、服务器、有效期），100% 精准判定是否真正进入了控制台"""
     try:
         konsola_visible = page.locator("text=Konsola").first.is_visible()
         waznosc_visible = page.locator("text=DATA WAŻNOŚCI").first.is_visible()
@@ -62,7 +62,7 @@ def check_is_successfully_loaded(page):
         return False
 
 def check_is_cf_page(page):
-    """检测当前是否仍卡在验证码页面（通过检测页面是否仍存在非主 Frame 的子 iframe 进行100%绝对判定）"""
+    """检测当前是否仍卡在验证码页面（通过检测页面是否仍存在非主 Frame 的子 iframe 进行 100% 绝对判定）"""
     try:
         child_frames = [f for f in page.frames if f != page.main_frame]
         return len(child_frames) > 0
@@ -91,11 +91,11 @@ def load_page_with_cf_bypass(page, url):
         box = None
         try:
             # 2. 核心回归（同 Run #35）：利用 frame_element().bounding_box() 拿取绝对坐标
-            # 这在我们之前的测试里已经被证实能 100% 完美计算出 (490, 375.3) 的精确位置
+            # 这在我们之前的测试里已经被证实能 100% 完美计算出 (490.0, 375.3) 的精确位置
             iframe_handle = turnstile_frame.frame_element()
             box = iframe_handle.bounding_box()
             if box:
-                print(f"✓ 成功通过底层接口获取验证盾实时物理坐标: x={box['x']:.1f}, y={box['y']:.1f}, w={box['width']:.1f}, h={box['height']:.1f}")
+                print(f"✓ 成功获取验证盾绝对物理坐标: x={box['x']:.1f}, y={box['y']:.1f}, w={box['width']:.1f}, h={box['height']:.1f}")
         except Exception as e:
             print(f"尝试通过 frame_element 获取坐标失败: {e}")
                 
@@ -118,7 +118,7 @@ def load_page_with_cf_bypass(page, url):
         ]
         
         for x, y in points_to_click:
-            # 每次点击前，直接检测控制面板独有元素。如果进去了，立即通关退出！
+            # 核心改进：每次点击前，直接检测控制面板独有元素。如果进去了，立即通关退出！
             if check_is_successfully_loaded(page):
                 print("✓ 恭喜！控制面板特有元素已出现，验证成功通过！")
                 break
