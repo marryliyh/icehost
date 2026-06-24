@@ -118,18 +118,30 @@ def run():
             return
 
         # 6. 安全寻找并点击续期按钮
-        # 终极修复：使用 not(*) 强制排除外层包装，且使用小写转换，100% 精准、唯一锁定按钮本身！
         renew_btn_selector = "//*[not(*) and contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'dodaj 6')]"
         
         try:
             print("正在等待续期按钮加载...")
-            # 阻塞式主动等待，给予最长 15 秒的时间让 React 完成渲染
             sb.wait_for_element_visible(renew_btn_selector, timeout=15)
             print("未检测到限制提示，找到续期按钮，正在点击...")
             sb.click(renew_btn_selector)
-            sb.sleep(10) # 等待 10 秒页面处理
             
-            # 刷新页面检查二次结果
+            # ⚡ 核心改进：点击后，在不刷新页面的前提下，先等待 5 秒让可能弹出的红框提示充分渲染
+            sb.sleep(5)
+            sb.save_screenshot("icehost_debug_screenshot.png")
+            
+            # 立即读取当前最真实的页面源码（此时若有报错红条，必定还挂在屏幕上）
+            current_source = sb.get_page_source()
+            is_failed_due_to_limit = any(kw in current_source for kw in keywords)
+            
+            if is_failed_due_to_limit:
+                # 如果点击后页面上弹出了红框，说明“未到可续期时间”（续期未成功）
+                # 此时我们精准拦截：安静退出，绝不发送 Telegram 提醒打扰你！
+                print("点击后，页面立刻弹出了限制提示：说明未到可续期时间（续期未成功）。结束本次运行（不发送 Telegram 提醒）。")
+                return
+            
+            # 如果没有弹出红框，说明时间确实被成功延长了，这时才执行刷新验证结果
+            print("点击后未检测到报错红条，正在刷新页面确认续期结果...")
             sb.refresh()
             sb.sleep(5)
             sb.save_screenshot("icehost_debug_screenshot.png")
@@ -138,12 +150,11 @@ def run():
             is_now_limited = any(kw in updated_source for kw in keywords)
             
             if is_now_limited:
-                # 按照您的要求：如果点击后出现了红框限制提示，说明确实“未到可续期时间”（时间没变且报错）
-                # 此时不发送 Telegram 消息，保持安静直接退出。
-                print("点击后弹出了红框限制提示：说明未到可续期时间（续期未成功）。结束本次运行（不发送 Telegram 提醒）。")
-            else:
-                # 只有真正没有报错、成功延长了时间才发送 TG
                 msg = "⚡ <b>IceHost 服务器续期成功！</b>\n服务器已真正成功延长 6 小时有效期。"
+                print(msg)
+                send_tg_notification(msg, "icehost_debug_screenshot.png")
+            else:
+                msg = "ℹ️ <b>IceHost 续期指令已发送</b>\n按钮已点击，请检查下方截图确认是否成功。"
                 print(msg)
                 send_tg_notification(msg, "icehost_debug_screenshot.png")
         except Exception as e:
