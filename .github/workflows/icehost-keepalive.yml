@@ -17,11 +17,13 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install playwright requests
+          # 关键修改：在这里引入了 playwright-stealth 混淆库
+          pip install playwright requests playwright-stealth
           playwright install chromium
 
-      # ⚡ 核心修改：已经彻底删除了 Set up WARP 步骤！
-      # 恢复使用 GitHub Actions 干净的原生 IP，这样就能彻底避免触发物理人机验证码。
+      # 关键修改：重新开启 WARP 代理，避开机房 IP 硬拦截
+      - name: Set up WARP
+        uses: fscarmen/warp-on-actions@v1.1
 
       - name: Run check script
         env:
