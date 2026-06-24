@@ -2,8 +2,10 @@ import os
 import time
 import json
 import urllib.parse
+import random
 import requests
 from playwright.sync_api import sync_playwright
+
 try:
     from playwright_stealth import Stealth
     _USE_STEALTH_CLASS = True
@@ -49,60 +51,58 @@ def send_tg_notification(message, photo_path=None):
         except Exception as e:
             print(f"发送 TG 截图异常: {e}")
 
-def check_is_cf_page(page):
-    """精准检测当前是否仍卡在 Cloudflare 验证拦截页面"""
+def check_is_cf_page_by_title(page):
+    """通过主页面的标题或核心可见文本，100% 精准判定当前是否处于 Cloudflare 验证页"""
     try:
-        title_match = "Challenge" in page.title()
-        h1_match = page.locator("h1:has-text('Challenge')").first.is_visible()
-        text_match_1 = page.locator("text=Connection Challenge").first.is_visible()
-        text_match_2 = page.locator("text=Verify you are human").first.is_visible()
-        return title_match or h1_match or text_match_1 or text_match_2
+        title = page.title()
+        title_match = "Challenge" in title or "Verify" in title
+        text_match = page.locator("text=Verify you are human").first.is_visible() or page.locator("text=Connection Challenge").first.is_visible()
+        return title_match or text_match
     except Exception:
         return False
 
 def load_page_with_cf_bypass(page, url):
-    """智能页面加载函数：通过未隔离的父级容器获取绝对物理坐标并实施多点精准点击"""
+    """智能页面加载函数：通过主页面特征判定，强力阻塞等待验证盾，并获取物理坐标执行模拟真人点击"""
     print(f"正在访问页面: {url}")
     page.goto(url)
-    
-    # 轮询 15 秒，直接通过浏览器底层 Frame 列表搜寻验证盾 iframe
-    turnstile_frame = None
-    for i in range(15):
-        for frame in page.frames:
-            if "challenge-platform" in frame.url or "challenges.cloudflare.com" in frame.url:
-                turnstile_frame = frame
-                break
-        if turnstile_frame:
-            break
-        page.wait_for_timeout(1000)
+    page.wait_for_timeout(5000) # 首先给予 5 秒让页面完成基础渲染
 
-    if turnstile_frame:
-        print("⚡ 成功通过底层接口穿透闭合影子 DOM 捕获到 Cloudflare 验证盾 iframe！")
-        page.wait_for_timeout(3000) # 给予 3 秒缓冲时间确保其完全渲染完毕
+    # 1. 直接检查主页面标题和文本，100% 确定当前是否需要过盾
+    if check_is_cf_page_by_title(page):
+        print("⚡ 经检测，当前确实处于 Cloudflare Connection Challenge 验证拦截页面！")
         
+        # 2. 强行阻塞等待，直到页面上的验证盾 iframe 渲染并显示出来（最长等待 15 秒）
+        # 这样可以彻底根除由于异步加载时差导致的“探测虚空”问题
+        iframe_selector = "iframe"
+        try:
+            print("正在等待验证盾 iframe 元素在页面上完全渲染...")
+            page.wait_for_selector(iframe_selector, state="visible", timeout=15000)
+            page.wait_for_timeout(3000) # 找到后额外等待 3 秒确保完全加载
+        except Exception:
+            print("⚠️ 在 15 秒内未能在页面上定位到可见的 iframe 元素。")
+            return
+
+        # 3. 动态获取该验证盾在当前 Linux 屏幕上的真实物理定位
         box = None
-        # 核心突破：通过主页面上未被隔离和跨域限制的父级容器（如 #turnstile-wrapper、.cf-turnstile 等 div）获取物理边界框！
-        for selector in ["#turnstile-wrapper", ".cf-turnstile", "div:has(iframe)", "iframe"]:
+        for selector in ["#turnstile-wrapper", ".cf-turnstile", "iframe"]:
             try:
                 temp_box = page.locator(selector).first.bounding_box()
                 if temp_box and temp_box["width"] > 50 and temp_box["height"] > 20:
                     box = temp_box
-                    print(f"✓ 成功通过选择器 '{selector}' 获取到验证盾物理坐标: x={box['x']:.1f}, y={box['y']:.1f}, w={box['width']:.1f}, h={box['height']:.1f}")
+                    print(f"✓ 成功获取到验证盾物理坐标: x={box['x']:.1f}, y={box['y']:.1f}, w={box['width']:.1f}, h={box['height']:.1f}")
                     break
             except Exception:
                 pass
                 
         if not box:
-            # 最终经验保底：如果全部读取失败，则使用 1280x720 视口下的标准经验坐标
-            print("⚠️ 无法获取验证盾边界定位框，启用标准视口固定经验坐标...")
+            print("⚠️ 无法获取验证盾边界定位框，启用标准视口固定经验坐标保底...")
             box = {"x": 490.0, "y": 375.3, "width": 300.0, "height": 65.0}
 
-        # 准备高精度点击
         base_x = box["x"]
         base_y = box["y"]
         h_center = box["height"] / 2
         
-        # 精调网格点击点（针对复选框所在的左侧位置 30px ~ 45px 范围进行多点微调）
+        # 围绕复选框所在的左侧位置（30px ~ 45px 范围）进行多点微调
         points_to_click = [
             (base_x + 35, base_y + h_center),      # 1. 理论复选框正中心
             (base_x + 40, base_y + h_center),      # 2. 稍微偏右 5 像素
@@ -113,17 +113,29 @@ def load_page_with_cf_bypass(page, url):
         ]
         
         for x, y in points_to_click:
-            if not check_is_cf_page(page):
+            # 每次点击前，严密探测当前是否仍卡在验证页
+            if not check_is_cf_page_by_title(page):
+                print("✓ 验证页面已消失，成功通过验证！")
                 break
-            print(f"正在模拟真人平滑移动至 ({x:.1f}, {y:.1f}) 并执行物理点击...")
-            page.mouse.move(x, y, steps=10) # 模拟真人 10 步平滑移动轨迹
-            page.wait_for_timeout(400)
-            page.mouse.click(x, y)
-            page.wait_for_timeout(6000) # 每次点击后等待 6 秒观察
-            
-            if not check_is_cf_page(page):
-                print("✓ 恭喜！验证盾已成功解开，退出点击循环。")
-                break
+                
+            print(f"正在模拟真人平滑移动至 ({x:.1f}, {y:.1f}) 并执行物理按压点击...")
+            try:
+                page.mouse.move(x, y, steps=15)
+                page.wait_for_timeout(random.randint(400, 800)) # 模拟人类悬停观察
+                page.mouse.down()
+                page.wait_for_timeout(random.randint(100, 180)) # 模拟真人点击按压延迟
+                page.mouse.up()
+                
+                # 点击后等待 6 秒观察状态
+                page.wait_for_timeout(6000)
+                
+                if not check_is_cf_page_by_title(page):
+                    print("✓ 页面标题已改变，验证成功通过！")
+                    break
+                else:
+                    print("验证盾依然存在，准备尝试下一个微调坐标点...")
+            except Exception as e:
+                print(f"点击坐标 ({x:.1f}, {y:.1f}) 遇到问题: {e}")
                 
         # 成功通过后，额外多等待 8 秒完成页面 React 数据加载
         print("正在等待页面 React 异步数据完全加载...")
@@ -213,6 +225,21 @@ def run():
 
         page = context.new_page()
 
+        # 向页面注入高精防检测混淆
+        if _USE_STEALTH_CLASS is True:
+            try:
+                stealth = Stealth()
+                stealth.apply_stealth_sync(page)
+                print("✓ 成功应用新版 playwright-stealth 混淆指纹！")
+            except Exception as se:
+                print(f"应用新版 stealth 失败，跳过: {se}")
+        elif _USE_STEALTH_CLASS is False:
+            try:
+                stealth_sync(page)
+                print("✓ 成功应用旧版 playwright-stealth 混淆指纹！")
+            except Exception as se:
+                print(f"应用旧版 stealth 失败，跳过: {se}")
+
         # 全局网络流量拦截与指纹清洗
         def handle_route(route):
             headers = {**route.request.headers}
@@ -224,7 +251,7 @@ def run():
 
         page.route("**/*", handle_route)
 
-        # 首次访问：使用优化后的过盾函数
+        # 首次访问并过盾
         load_page_with_cf_bypass(page, SERVER_URL)
 
         # 首次截图
