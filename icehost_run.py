@@ -4,6 +4,16 @@ import json
 import urllib.parse
 import requests
 from playwright.sync_api import sync_playwright
+try:
+    from playwright_stealth import Stealth
+    _USE_STEALTH_CLASS = True
+except ImportError:
+    try:
+        from playwright_stealth import stealth_sync
+        _USE_STEALTH_CLASS = False
+    except ImportError:
+        print("警告: 系统中未找到 playwright-stealth 库，将跳过高级指纹混淆。")
+        _USE_STEALTH_CLASS = None
 
 SERVER_URL = os.getenv("ICEHOST_SERVER_URL")
 ICEHOST_COOKIES = os.getenv("ICEHOST_COOKIES")
@@ -40,46 +50,55 @@ def send_tg_notification(message, photo_path=None):
             print(f"发送 TG 截图异常: {e}")
 
 def load_page_with_cf_bypass(page, url):
-    """智能页面加载函数：自动检测并穿透点击 Cloudflare 的物理人机验证码"""
+    """智能页面加载函数：自动检测并双重穿透点击 Cloudflare 的物理人机验证码"""
     print(f"正在访问页面: {url}")
     page.goto(url)
-    page.wait_for_timeout(6000) # 给予 6 秒让验证码充分渲染出来
-
-    # 尝试执行 3 轮人机验证框点击探测
-    for i in range(3):
-        # 查找 Cloudflare 安全验证的特定 iframe
-        cf_iframe = page.frame_locator("iframe[src*='challenges.cloudflare.com']").first
-        
-        # 检查验证码容器在页面上是否可见
-        if cf_iframe.locator("body").is_visible():
-            print(f"⚡ 检测到 Cloudflare 验证盾 (第 {i+1}/3 次尝试点击)...")
-            
-            # 依次尝试点击复选框元素、验证舞台、或直接点击整个 Body
-            target_selectors = ["input[type='checkbox']", "#challenge-stage", "body"]
-            clicked_this_turn = False
-            
-            for selector in target_selectors:
-                try:
-                    target = cf_iframe.locator(selector).first
-                    if target.is_visible() and target.is_enabled():
-                        print(f"由于验证盾被唤醒，正在尝试点击: '{selector}'...")
-                        target.click()
-                        page.wait_for_timeout(8000) # 等待 8 秒让安全系统判定并跳转
-                        clicked_this_turn = True
-                        break
-                except Exception as e:
-                    pass
-            
-            if clicked_this_turn:
-                # 重新检查验证盾是否已经消失
-                if not page.frame_locator("iframe[src*='challenges.cloudflare.com']").first.locator("body").is_visible():
-                    print("✓ 验证码已成功通过！")
-                    break
-        else:
-            print("页面未检测到验证盾，或已成功跳过。")
+    
+    # 探测验证盾 iframe 元素是否存在于父页面中
+    cf_selectors = [
+        "iframe[src*='challenges.cloudflare.com']",
+        "iframe[title*='Cloudflare']",
+        "iframe[title*='security challenge']"
+    ]
+    
+    iframe_selector = ""
+    # 循环探测最多 15 秒，确保验证盾渲染完成
+    for _ in range(15):
+        for selector in cf_selectors:
+            if page.locator(selector).first.is_visible():
+                iframe_selector = selector
+                break
+        if iframe_selector:
             break
+        page.wait_for_timeout(1000)
 
-    # 最后给予 5 秒让页面完成其余的异步 React 加载
+    if iframe_selector:
+        print(f"⚡ 检测到 Cloudflare 验证盾元素 ('{iframe_selector}')！正在尝试过盾...")
+        page.wait_for_timeout(3000) # 给予 3 秒缓冲时间确保其内部渲染完毕
+        
+        # 【方法一】：尝试穿透进入 iframe 内部点击 input[type='checkbox']
+        try:
+            cf_iframe = page.frame_locator(iframe_selector).first
+            checkbox = cf_iframe.locator("input[type='checkbox']").first
+            if checkbox.is_visible():
+                print("尝试穿透点击复选框元素...")
+                checkbox.click()
+                page.wait_for_timeout(8000)
+                return
+        except Exception as e:
+            print(f"穿透点击失败，尝试保底方案: {e}")
+            
+        # 【方法二】：保底点击。直接在父页面点击该 iframe 元素的中心点。
+        # 验证框完美处于 iframe 的正中心，从父页面直接点击该元素中心同样能成功触发点击！
+        try:
+            print("正在执行保底点击：模拟物理点击 iframe 元素正中心...")
+            page.locator(iframe_selector).first.click()
+            page.wait_for_timeout(8000)
+        except Exception as click_err:
+            print(f"保底点击失败: {click_err}")
+    else:
+        print("页面未检测到验证盾，或已成功跳过。")
+        
     page.wait_for_timeout(5000)
 
 def run():
@@ -88,7 +107,7 @@ def run():
         return
 
     with sync_playwright() as p:
-        # 启动防自动化参数，抹除自动化特征
+        # 启用过检测参数，抹除自动化特征
         browser = p.chromium.launch(
             headless=True,
             args=[
@@ -162,6 +181,21 @@ def run():
 
         page = context.new_page()
 
+        # ⚡ 核心修改：向页面注入高精防检测混淆
+        if _USE_STEALTH_CLASS is True:
+            try:
+                stealth = Stealth()
+                stealth.apply_stealth_sync(page)
+                print("✓ 成功应用新版 playwright-stealth 混淆指纹！")
+            except Exception as se:
+                print(f"应用新版 stealth 失败，跳过: {se}")
+        elif _USE_STEALTH_CLASS is False:
+            try:
+                stealth_sync(page)
+                print("✓ 成功应用旧版 playwright-stealth 混淆指纹！")
+            except Exception as se:
+                print(f"应用旧版 stealth 失败，跳过: {se}")
+
         # 全局网络流量拦截与指纹清洗
         def handle_route(route):
             headers = {**route.request.headers}
@@ -173,8 +207,7 @@ def run():
 
         page.route("**/*", handle_route)
 
-        # 首次访问：使用带有人机穿透逻辑的专用函数
-        load_success = page.goto(SERVER_URL)
+        # 首次访问：使用优化后的过盾函数
         load_page_with_cf_bypass(page, SERVER_URL)
 
         # 首次截图
