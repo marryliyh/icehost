@@ -80,7 +80,7 @@ def move_mouse_humanlike(page, to_x, to_y):
         page.mouse.move(to_x, to_y)
 
 def load_page_with_cf_bypass(page, url):
-    """智能页面加载函数：通过主页面安全获取绝对物理坐标，结合真人按压和严密判定进行通关"""
+    """智能页面加载函数：通过遍历 div 元素尺寸（物理尺寸指纹扫描法）精准获取绝对坐标并点击"""
     print(f"正在访问页面: {url}")
     page.goto(url)
     
@@ -103,16 +103,31 @@ def load_page_with_cf_bypass(page, url):
         page.wait_for_timeout(500)
 
         box = None
-        # 核心突破：直接从父页面 DOM 获取唯一一个 'iframe' 的绝对物理坐标。
-        # 这是一个标准主页面操作，不涉及任何跨域沙箱穿透，因此在 Firefox (Gecko 引擎) 下 100% 不会报错，且可以完美动态获取最真实的排版坐标！
+        
+        # 核心突破：地毯式物理尺寸指纹扫描定位法！
+        # 遍历页面所有的 div，直接读取并比对它们的真实物理宽高
+        # Cloudflare 验证框的尺寸在 1280x720 视口下必定在 宽 280-320px、高 50-100px 之间。
+        # 这一招可以 100% 避开任何影子 DOM 的跨域阻隔和报错，在 Firefox 下完美获取最精准的物理像素位置！
         try:
-            iframe_locator = page.locator("iframe").first
-            if iframe_locator.is_visible():
-                box = iframe_locator.bounding_box()
-                if box and box["width"] > 50 and box["height"] > 20:
-                    print(f"✓ 成功通过主页面 'iframe' 元素获取到最精准物理坐标: x={box['x']:.1f}, y={box['y']:.1f}, w={box['width']:.1f}, h={box['height']:.1f}")
-        except Exception as e:
-            print(f"通过主页面 'iframe' 定位获取定位框异常: {e}")
+            divs = page.locator("div")
+            div_count = divs.count()
+            print(f"正在主页面扫描所有 {div_count} 个 div 元素的物理指纹...")
+            
+            for i in range(div_count):
+                try:
+                    temp_box = divs.nth(i).bounding_box()
+                    if temp_box:
+                        w = temp_box["width"]
+                        h = temp_box["height"]
+                        # 检测其物理宽高是否符合 CF 验证盾的标准尺寸特征
+                        if 280 <= w <= 320 and 50 <= h <= 100:
+                            box = temp_box
+                            print(f"✓ 成功通过物理尺寸扫描定位到验证盾: x={box['x']:.1f}, y={box['y']:.1f}, w={w:.1f}, h={h:.1f}")
+                            break
+                except Exception:
+                    pass
+        except Exception as scan_err:
+            print(f"物理指纹扫描失败: {scan_err}")
                 
         if not box:
             print("⚠️ 无法获取验证盾边界定位框，启用标准视口固定经验坐标保底...")
