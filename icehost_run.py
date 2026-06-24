@@ -5,18 +5,6 @@ import urllib.parse
 import requests
 from playwright.sync_api import sync_playwright
 
-# 智能双版本兼容导入 playwright-stealth
-try:
-    from playwright_stealth import Stealth
-    _USE_STEALTH_CLASS = True
-except ImportError:
-    try:
-        from playwright_stealth import stealth_sync
-        _USE_STEALTH_CLASS = False
-    except ImportError:
-        print("警告: 系统中未找到 playwright-stealth 库，将跳过高级指纹混淆。")
-        _USE_STEALTH_CLASS = None
-
 SERVER_URL = os.getenv("ICEHOST_SERVER_URL")
 ICEHOST_COOKIES = os.getenv("ICEHOST_COOKIES")
 
@@ -51,13 +39,56 @@ def send_tg_notification(message, photo_path=None):
         except Exception as e:
             print(f"发送 TG 截图异常: {e}")
 
+def load_page_with_cf_bypass(page, url):
+    """智能页面加载函数：自动检测并穿透点击 Cloudflare 的物理人机验证码"""
+    print(f"正在访问页面: {url}")
+    page.goto(url)
+    page.wait_for_timeout(6000) # 给予 6 秒让验证码充分渲染出来
+
+    # 尝试执行 3 轮人机验证框点击探测
+    for i in range(3):
+        # 查找 Cloudflare 安全验证的特定 iframe
+        cf_iframe = page.frame_locator("iframe[src*='challenges.cloudflare.com']").first
+        
+        # 检查验证码容器在页面上是否可见
+        if cf_iframe.locator("body").is_visible():
+            print(f"⚡ 检测到 Cloudflare 验证盾 (第 {i+1}/3 次尝试点击)...")
+            
+            # 依次尝试点击复选框元素、验证舞台、或直接点击整个 Body
+            target_selectors = ["input[type='checkbox']", "#challenge-stage", "body"]
+            clicked_this_turn = False
+            
+            for selector in target_selectors:
+                try:
+                    target = cf_iframe.locator(selector).first
+                    if target.is_visible() and target.is_enabled():
+                        print(f"由于验证盾被唤醒，正在尝试点击: '{selector}'...")
+                        target.click()
+                        page.wait_for_timeout(8000) # 等待 8 秒让安全系统判定并跳转
+                        clicked_this_turn = True
+                        break
+                except Exception as e:
+                    pass
+            
+            if clicked_this_turn:
+                # 重新检查验证盾是否已经消失
+                if not page.frame_locator("iframe[src*='challenges.cloudflare.com']").first.locator("body").is_visible():
+                    print("✓ 验证码已成功通过！")
+                    break
+        else:
+            print("页面未检测到验证盾，或已成功跳过。")
+            break
+
+    # 最后给予 5 秒让页面完成其余的异步 React 加载
+    page.wait_for_timeout(5000)
+
 def run():
     if not SERVER_URL or not ICEHOST_COOKIES:
         print("错误: 缺少 ICEHOST_SERVER_URL 或 ICEHOST_COOKIES")
         return
 
     with sync_playwright() as p:
-        # 启用过检测参数，抹除自动化特征
+        # 启动防自动化参数，抹除自动化特征
         browser = p.chromium.launch(
             headless=True,
             args=[
@@ -87,15 +118,20 @@ def run():
             else:
                 raise ValueError("未知的数据格式")
 
-            # 1. 精准注入并进行 URL 解码
+            # 1. 注入并进行高精度统一 URL 编码
             formatted_cookies = []
             for c in cookies_to_add:
                 raw_value = c["value"]
-                decoded_value = urllib.parse.unquote(raw_value)
+                
+                # 第一步：先解码，还原为未编码的原始字符
+                clean_value = urllib.parse.unquote(raw_value)
+                
+                # 第二步：将原始字符进行全局统一的 URL 编码，避免 PHP 引擎加号漏洞
+                encoded_value = urllib.parse.quote(clean_value)
                 
                 fc = {
                     "name": c["name"],
-                    "value": decoded_value,
+                    "value": encoded_value,
                     "domain": c["domain"],
                     "path": c.get("path", "/")
                 }
@@ -126,21 +162,6 @@ def run():
 
         page = context.new_page()
 
-        # ⚡ 核心修改：向页面注入高精防检测混淆（智能判断库的版本并执行注入）
-        if _USE_STEALTH_CLASS is True:
-            try:
-                stealth = Stealth()
-                stealth.apply_stealth_sync(page)
-                print("✓ 成功应用新版 playwright-stealth 混淆指纹！")
-            except Exception as se:
-                print(f"应用新版 stealth 失败，跳过: {se}")
-        elif _USE_STEALTH_CLASS is False:
-            try:
-                stealth_sync(page)
-                print("✓ 成功应用旧版 playwright-stealth 混淆指纹！")
-            except Exception as se:
-                print(f"应用旧版 stealth 失败，跳过: {se}")
-
         # 全局网络流量拦截与指纹清洗
         def handle_route(route):
             headers = {**route.request.headers}
@@ -152,9 +173,9 @@ def run():
 
         page.route("**/*", handle_route)
 
-        print(f"正在访问 IceHost 面板: {SERVER_URL}")
-        page.goto(SERVER_URL)
-        page.wait_for_timeout(10000)
+        # 首次访问：使用带有人机穿透逻辑的专用函数
+        load_success = page.goto(SERVER_URL)
+        load_page_with_cf_bypass(page, SERVER_URL)
 
         # 首次截图
         page.screenshot(path="icehost_debug_screenshot.png")
@@ -187,7 +208,9 @@ def run():
         if renew_btn.is_visible() and renew_btn.is_enabled():
             print("未检测到限制提示，找到续期按钮，正在点击...")
             renew_btn.click()
-            page.wait_for_timeout(10000) # 等待 10 秒
+            
+            # 重新使用穿透检测重新载入和等待
+            load_page_with_cf_bypass(page, SERVER_URL)
             
             # 重新截图
             page.screenshot(path="icehost_debug_screenshot.png")
