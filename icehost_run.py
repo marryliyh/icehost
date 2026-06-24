@@ -50,61 +50,64 @@ def send_tg_notification(message, photo_path=None):
             print(f"发送 TG 截图异常: {e}")
 
 def load_page_with_cf_bypass(page, url):
-    """智能页面加载函数：自动等待并利用物理中心点点击法穿透 Cloudflare 的物理人机验证码"""
+    """智能页面加载函数：自动等待并利用物理位置模拟点击穿透 Cloudflare 的人机验证"""
     print(f"正在访问页面: {url}")
     page.goto(url)
-    
-    # 增加对 cdn-cgi 同源路径的检测，并加入 "iframe" 作为终极保底选择器（页面上唯一一个 iframe 就是验证盾）
+    page.wait_for_timeout(6000) # 给予 6 秒让验证码渲染
+
+    # 包含可能出现的各种 Cloudflare iframe 标志，以 iframe 作为保底
     cf_selectors = [
         "iframe[src*='challenge-platform']",
         "iframe[src*='challenges.cloudflare.com']",
-        "iframe" 
+        "iframe"
     ]
     
     iframe_selector = ""
-    # 轮询 15 秒，确保验证盾元素在页面上加载并显示
+    # 轮询 15 秒，确保验证盾在页面上加载完成
     for _ in range(15):
         for selector in cf_selectors:
-            if page.locator(selector).first.is_visible():
-                iframe_selector = selector
-                break
+            try:
+                if page.locator(selector).first.is_visible():
+                    iframe_selector = selector
+                    break
+            except Exception:
+                pass
         if iframe_selector:
             break
         page.wait_for_timeout(1000)
 
     if iframe_selector:
         print(f"⚡ 成功检测到 Cloudflare 验证盾 iframe 元素 ('{iframe_selector}')！正在尝试过盾...")
-        page.wait_for_timeout(4000) # 给予 4 秒缓冲时间确保其完全渲染完毕
+        page.wait_for_timeout(3000) # 给予 3 秒缓冲时间确保其完全渲染完毕
         
-        # 【方法一（终极物理保底）】：直接点击父页面中该 iframe 元素的中心点
-        # 验证框完美处于整个 iframe 的正中心，直接在父页面点击该元素中心同样能 100% 成功触发勾选并避开影子 DOM 隔离
         try:
-            print("正在执行保底点击：模拟物理点击 iframe 元素正中心...")
-            page.locator(iframe_selector).first.click()
-            print("已模拟物理点击中心，等待验证通过...")
-            page.wait_for_timeout(8000)
-            
-            # 如果点击后 iframe 消失了，说明已经成功通过
-            if not page.locator(iframe_selector).first.is_visible():
-                print("✓ 验证码已通过物理中心点击法成功解开！")
-                return
-        except Exception as click_err:
-            print(f"物理中心点点击失败，尝试备用方案: {click_err}")
-
-        # 【方法二（底层穿透备用）】：如果方法一没通过，再尝试进入底层 iframe 内部点击
-        try:
-            turnstile_frame = None
-            for frame in page.frames:
-                if "challenge-platform" in frame.url or "challenges.cloudflare.com" in frame.url:
-                    turnstile_frame = frame
-                    break
-            if turnstile_frame:
-                print("尝试通过底层 Frame 接口注入点击...")
-                # 尝试点击 iframe 内部的 body 任意区域
-                turnstile_frame.locator("body").first.click(timeout=3000)
-                page.wait_for_timeout(8000)
-        except Exception as frame_err:
-            print(f"底层注入点击失败: {frame_err}")
+            # 读取该 iframe 在主页面上的绝对坐标和尺寸
+            box = page.locator(iframe_selector).first.bounding_box()
+            if box:
+                print(f"定位到验证盾坐标: x={box['x']}, y={box['y']}, 宽度={box['width']}, 高度={box['height']}")
+                
+                # 【第一步】：尝试点击复选框所在区域
+                # 根据标准布局，点击框（Checkbox）中心大约位于 iframe 左边缘向右 35px 的位置，高度处于正中
+                click_x = box["x"] + 35
+                click_y = box["y"] + box["height"] / 2
+                
+                print(f"正在模拟真人鼠标轨迹移动并点击复选框位置 ({click_x}, {click_y})...")
+                page.mouse.move(click_x, click_y, steps=10) # 模拟 10 步平滑移动轨迹
+                page.wait_for_timeout(500)
+                page.mouse.click(click_x, click_y)
+                page.wait_for_timeout(6000)
+                
+                # 检查验证盾是否依然存在，如果依然存在则执行保底方案
+                if page.locator(iframe_selector).first.is_visible():
+                    print("验证盾依然存在，尝试保底方案：点击验证框正中心点...")
+                    center_x = box["x"] + box["width"] / 2
+                    center_y = box["y"] + box["height"] / 2
+                    page.mouse.move(center_x, center_y, steps=10)
+                    page.wait_for_timeout(500)
+                    page.mouse.click(center_x, center_y)
+                    page.wait_for_timeout(8000)
+        except Exception as e:
+            print(f"模拟鼠标点击过程中发生异常: {e}")
     else:
         print("页面未检测到验证盾，或已成功跳过。")
         
@@ -116,7 +119,7 @@ def run():
         return
 
     with sync_playwright() as p:
-        # 启用过检测参数，抹除自动化特征
+        # 启动防自动化参数，抹除自动化特征
         browser = p.chromium.launch(
             headless=True,
             args=[
@@ -127,7 +130,7 @@ def run():
         )
         
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, Gecko) Chrome/120.0.0.0 Safari/537.36",
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             viewport={"width": 1280, "height": 720}
         )
 
@@ -154,7 +157,7 @@ def run():
                 # 第一步：先解码，还原为未编码的原始字符
                 clean_value = urllib.parse.unquote(raw_value)
                 
-                # 第二步：将原始字符进行全局统一的 URL 编码，避免 PHP 引擎加号漏洞
+                # 第二步：将原始字符进行全局统一 of URL 编码，避免 PHP 引擎加号漏洞
                 encoded_value = urllib.parse.quote(clean_value)
                 
                 fc = {
@@ -190,7 +193,7 @@ def run():
 
         page = context.new_page()
 
-        # ⚡ 核心修改：向页面注入高精防检测混淆
+        # 向页面注入高精防检测混淆
         if _USE_STEALTH_CLASS is True:
             try:
                 stealth = Stealth()
