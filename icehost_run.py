@@ -88,11 +88,11 @@ def run():
             except Exception as e:
                 print(f"注入 Cookie 过程中发生异常，跳过: {e}")
 
-        # 3. 核心大招：自动寻找并执行系统级物理点击过 Cloudflare Turnstile 验证盾！
+        # 3. 核心过盾：自动寻找并执行系统级物理点击过 Cloudflare Turnstile 验证盾
         sb.save_screenshot("icehost_debug_screenshot.png")
         try:
             print("正在检测并调用系统级 PyAutoGUI 驱动，物理点击 Cloudflare 人机验证盾...")
-            # 这个 API 会在虚拟桌面上定位验证框，并真正发送按下和松开鼠标的内核事件
+            # 在虚拟桌面上定位验证框并模拟发送系统硬件级点击事件
             sb.uc_gui_click_captcha()
             sb.sleep(10) # 给予 10 秒跳转缓冲
             sb.save_screenshot("icehost_debug_screenshot.png")
@@ -118,9 +118,13 @@ def run():
             return
 
         # 6. 安全寻找并点击续期按钮
-        renew_btn_selector = "a:contains('DODAJ 6 GODZIN'), button:contains('DODAJ 6 GODZIN')"
+        # 改用强大的标签无关纯文本定位器
+        renew_btn_selector = "text=DODAJ 6 GODZIN"
         
-        if sb.is_element_visible(renew_btn_selector):
+        try:
+            print("正在等待续期按钮加载...")
+            # 核心改进：阻塞式主动等待，给予最长 15 秒的时间让 React 完成渲染
+            sb.wait_for_element_visible(renew_btn_selector, timeout=15)
             print("未检测到限制提示，找到续期按钮，正在点击...")
             sb.click(renew_btn_selector)
             sb.sleep(10) # 等待 10 秒页面处理
@@ -141,8 +145,10 @@ def run():
                 msg = "ℹ️ <b>IceHost 续期指令已发送</b>\n按钮已点击，请检查下方截图确认是否成功。"
                 print(msg)
                 send_tg_notification(msg, "icehost_debug_screenshot.png")
-        else:
-            print("未在页面中找到可用的蓝色续期按钮。")
+        except Exception as e:
+            print(f"未在页面中找到可用的蓝色续期按钮（可能已被续满，或按钮标签发生变动）: {e}")
+
+        browser.close()
 
 if __name__ == "__main__":
     run()
