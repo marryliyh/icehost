@@ -118,37 +118,54 @@ def run():
             return
 
         # 6. 安全寻找并点击续期按钮
-        # 核心修改：改用标准的 XPath 深度文本扫瞄定位，100% 无视标签和框架限制
-        renew_btn_selector = "//*[contains(., 'DODAJ 6 GODZIN')]"
+        # 核心修改：设计一套高容错、大小写不敏感的模糊文本定位器
+        # 我们利用 XPath 1.0 的 translate 函数将网页文本转为纯小写，再与纯小写的 'dodaj 6' 进行匹配，100% 免疫前端 CSS 的大写伪装
+        renew_btn_selectors = [
+            "//*[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'dodaj 6 godzin')]", 
+            "*:contains('Dodaj 6')",
+            "*:contains('DODAJ 6')"
+        ]
         
-        try:
-            print("正在等待续期按钮加载...")
-            # 阻塞式主动等待，给予最长 15 秒的时间让 React 完成渲染并捕获
-            sb.wait_for_element_visible(renew_btn_selector, timeout=15)
-            print("未检测到限制提示，找到续期按钮，正在点击...")
-            sb.click(renew_btn_selector)
-            sb.sleep(10) # 等待 10 秒页面处理
-            
-            # 刷新页面检查二次结果
-            sb.refresh()
-            sb.sleep(5)
-            sb.save_screenshot("icehost_debug_screenshot.png")
-            
-            updated_source = sb.get_page_source()
-            is_now_limited = any(kw in updated_source for kw in keywords)
-            
-            if is_now_limited:
-                msg = "⚡ <b>IceHost 服务器续期成功！</b>\n服务器已真正成功延长 6 小时有效期。"
-                print(msg)
-                send_tg_notification(msg, "icehost_debug_screenshot.png")
-            else:
-                msg = "ℹ️ <b>IceHost 续期指令已发送</b>\n按钮已点击，请检查下方截图确认是否成功。"
-                print(msg)
-                send_tg_notification(msg, "icehost_debug_screenshot.png")
-        except Exception as e:
-            print(f"未在页面中找到可用的蓝色续期按钮（可能已被续满，或按钮标签发生变动）: {e}")
+        # 依次尝试匹配
+        selector_found = ""
+        print("正在等待续期按钮加载...")
+        for selector in renew_btn_selectors:
+            try:
+                # 阻塞式主动等待，给予最长 15 秒的时间让 React 完成渲染
+                sb.wait_for_element_visible(selector, timeout=15)
+                selector_found = selector
+                break
+            except Exception:
+                pass
+                
+        if selector_found:
+            try:
+                print(f"找到续期按钮（匹配选择器: '{selector_found}'），正在点击...")
+                sb.click(selector_found)
+                sb.sleep(10) # 等待 10 秒页面处理
+                
+                # 刷新页面检查二次结果
+                sb.refresh()
+                sb.sleep(5)
+                sb.save_screenshot("icehost_debug_screenshot.png")
+                
+                updated_source = sb.get_page_source()
+                is_now_limited = any(kw in updated_source for kw in keywords)
+                
+                if is_now_limited:
+                    msg = "⚡ <b>IceHost 服务器续期成功！</b>\n服务器已真正成功延长 6 小时有效期。"
+                    print(msg)
+                    send_tg_notification(msg, "icehost_debug_screenshot.png")
+                else:
+                    msg = "ℹ️ <b>IceHost 续期指令已发送</b>\n按钮已点击，请检查下方截图确认是否成功。"
+                    print(msg)
+                    send_tg_notification(msg, "icehost_debug_screenshot.png")
+            except Exception as e:
+                print(f"点击续期按钮或验证结果时发生异常: {e}")
+        else:
+            print("未在页面中找到可用的蓝色续期按钮（可能已被续满，或按钮标签发生变动）。")
 
-        # 核心修改：这里彻底删掉了多余的 browser.close()，让 seleniumbase 在 with 块结束时自动清理
+        # 自动由 with 语句关闭浏览器生命周期
 
 if __name__ == "__main__":
     run()
