@@ -3,20 +3,8 @@ import time
 import json
 import urllib.parse
 import random
-import math
 import requests
 from playwright.sync_api import sync_playwright
-
-try:
-    from playwright_stealth import Stealth
-    _USE_STEALTH_CLASS = True
-except ImportError:
-    try:
-        from playwright_stealth import stealth_sync
-        _USE_STEALTH_CLASS = False
-    except ImportError:
-        print("警告: 系统中未找到 playwright-stealth 库，将跳过高级指纹混淆。")
-        _USE_STEALTH_CLASS = None
 
 SERVER_URL = os.getenv("ICEHOST_SERVER_URL")
 ICEHOST_COOKIES = os.getenv("ICEHOST_COOKIES")
@@ -53,7 +41,7 @@ def send_tg_notification(message, photo_path=None):
             print(f"发送 TG 截图异常: {e}")
 
 def check_is_successfully_loaded(page):
-    """100% 确认是否真正进入了控制台（寻找翼龙面板独有元素）"""
+    """通过检测控制面板独有的元素（如波兰语的控制台、服务器、有效期），100% 精准判定是否真正进入了控制台"""
     try:
         konsola_visible = page.locator("text=Konsola").first.is_visible()
         waznosc_visible = page.locator("text=DATA WAŻNOŚCI").first.is_visible()
@@ -70,39 +58,12 @@ def check_is_cf_page(page):
     except Exception:
         return True
 
-def move_mouse_humanlike(page, to_x, to_y):
-    """使用二次贝塞尔曲线公式模拟真人的鼠标轨迹移动，彻底绕过 WAF 轨迹检测"""
-    try:
-        # 获取当前鼠标位置，如果刚开始，在边缘位置随机生成一个起点
-        from_x = random.randint(10, 100)
-        from_y = random.randint(10, 100)
-        
-        steps = random.randint(15, 25) # 移动步数
-        
-        # 随机生成一个控制点，使轨迹呈现出自然的弧度 (Curve)
-        control_x = (from_x + to_x) / 2 + random.randint(-100, 100)
-        control_y = (from_y + to_y) / 2 + random.randint(-100, 100)
-        
-        for i in range(steps + 1):
-            t = i / steps
-            # 二次贝塞尔曲线公式: B(t) = (1-t)^2 * P0 + 2*t*(1-t) * P1 + t^2 * P2
-            x = (1 - t)**2 * from_x + 2 * t * (1 - t) * control_x + t**2 * to_x
-            y = (1 - t)**2 * from_y + 2 * t * (1 - t) * control_y + t**2 * to_y
-            
-            page.mouse.move(x, y)
-            # 随机加减速延迟，模拟真人操作
-            page.wait_for_timeout(random.randint(10, 25))
-    except Exception as e:
-        print(f"平滑移动鼠标遇到异常，退回到直接移动: {e}")
-        page.mouse.move(to_x, to_y)
-
 def load_page_with_cf_bypass(page, url):
     """智能页面加载函数：通过底层列表捕获 Frame 绕过影子 DOM，获取绝对坐标并执行模拟真人按压点击"""
     print(f"正在访问页面: {url}")
     page.goto(url)
-    page.wait_for_timeout(6000) # 给予 6 秒让页面加载
-
-    # 1. 核心回归（同 Run #35）：直接通过 page.frames 轮询 15 秒搜寻子框架
+    
+    # 轮询 15 秒，直接在浏览器底层搜寻除主框架以外的任何子框架（验证盾）
     turnstile_frame = None
     for i in range(15):
         child_frames = [f for f in page.frames if f != page.main_frame]
@@ -113,7 +74,7 @@ def load_page_with_cf_bypass(page, url):
 
     if turnstile_frame:
         print("⚡ 成功通过底层接口穿透闭合影子 DOM 捕获到 Cloudflare 验证盾 iframe！")
-        page.wait_for_timeout(3000)
+        page.wait_for_timeout(3000) # 给予 3 秒缓冲时间确保其完全渲染完毕
         
         # 激活焦点：先在左上角空白处安全点击一下，确保浏览器窗口获得绝对焦点
         print("正在物理点击页面空白处以强制激活浏览器窗口焦点...")
@@ -122,7 +83,7 @@ def load_page_with_cf_bypass(page, url):
 
         box = None
         try:
-            # 2. 核心回归（同 Run #35）：利用 frame_element().bounding_box() 拿取绝对坐标
+            # 利用 frame_element().bounding_box() 拿取绝对坐标
             iframe_handle = turnstile_frame.frame_element()
             box = iframe_handle.bounding_box()
             if box:
@@ -156,16 +117,11 @@ def load_page_with_cf_bypass(page, url):
                 
             print(f"正在模拟真人平滑移动至 ({x:.1f}, {y:.1f}) 并执行物理按压点击...")
             try:
-                # 使用二次贝塞尔曲线平滑移动鼠标到指定目标，绕过 WAF 轨迹算法检测
-                move_mouse_humanlike(page, x, y)
-                
-                # 模拟人类悬停观察
-                page.wait_for_timeout(random.randint(400, 800))
-                # 鼠标按下
+                # 移动鼠标
+                page.mouse.move(x, y, steps=15)
+                page.wait_for_timeout(random.randint(400, 800)) # 模拟人类悬停观察
                 page.mouse.down()
-                # 模拟真实的物理按压延时（避开 0ms 机器检测）
-                page.wait_for_timeout(random.randint(100, 180))
-                # 鼠标松开
+                page.wait_for_timeout(random.randint(100, 180)) # 模拟真人点击按压延迟
                 page.mouse.up()
                 
                 # 点击后等待 6 秒观察状态
@@ -198,23 +154,13 @@ def run():
         return
 
     with sync_playwright() as p:
-        # 启用过检测参数，抹除自动化特征
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-setuid-sandbox"
-            ]
-        )
+        # ⚡ 核心修改：改用 Firefox 启动，Firefox 对 Cloudflare 的防自动化检测和 TLS 指纹指抗性极高！
+        browser = p.firefox.launch(headless=True)
         
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
             viewport={"width": 1280, "height": 720}
         )
-
-        # 隐藏自动化控制指纹
-        context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
         try:
             raw_data = json.loads(ICEHOST_COOKIES)
@@ -232,11 +178,7 @@ def run():
             formatted_cookies = []
             for c in cookies_to_add:
                 raw_value = c["value"]
-                
-                # 第一步：先解码，还原为未编码的原始字符
                 clean_value = urllib.parse.unquote(raw_value)
-                
-                # 第二步：将原始字符进行全局统一的 URL 编码，避免 PHP 引擎加号漏洞
                 encoded_value = urllib.parse.quote(clean_value)
                 
                 fc = {
@@ -272,28 +214,13 @@ def run():
 
         page = context.new_page()
 
-        # ⚡ 核心修改：向页面注入高精防检测混淆
-        if _USE_STEALTH_CLASS is True:
-            try:
-                stealth = Stealth()
-                stealth.apply_stealth_sync(page)
-                print("✓ 成功应用新版 playwright-stealth 混淆指纹！")
-            except Exception as se:
-                print(f"应用新版 stealth 失败，跳过: {se}")
-        elif _USE_STEALTH_CLASS is False:
-            try:
-                stealth_sync(page)
-                print("✓ 成功应用旧版 playwright-stealth 混淆指纹！")
-            except Exception as se:
-                print(f"应用旧版 stealth 失败，跳过: {se}")
-
         # 全局网络流量拦截与指纹清洗
         def handle_route(route):
             headers = {**route.request.headers}
-            headers["sec-ch-ua"] = '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"'
+            headers["sec-ch-ua"] = '"Firefox";v="122", "Gecko";v="122"'
             headers["sec-ch-ua-mobile"] = "?0"
             headers["sec-ch-ua-platform"] = '"Windows"'
-            headers["user-agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            headers["user-agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0"
             route.continue_(headers=headers)
 
         page.route("**/*", handle_route)
