@@ -4,8 +4,18 @@ import json
 import urllib.parse
 import requests
 from playwright.sync_api import sync_playwright
-# 引入高阶混淆包
-from playwright_stealth import stealth_sync
+
+# 智能双版本兼容导入 playwright-stealth
+try:
+    from playwright_stealth import Stealth
+    _USE_STEALTH_CLASS = True
+except ImportError:
+    try:
+        from playwright_stealth import stealth_sync
+        _USE_STEALTH_CLASS = False
+    except ImportError:
+        print("警告: 系统中未找到 playwright-stealth 库，将跳过高级指纹混淆。")
+        _USE_STEALTH_CLASS = None
 
 SERVER_URL = os.getenv("ICEHOST_SERVER_URL")
 ICEHOST_COOKIES = os.getenv("ICEHOST_COOKIES")
@@ -47,6 +57,7 @@ def run():
         return
 
     with sync_playwright() as p:
+        # 启用过检测参数，抹除自动化特征
         browser = p.chromium.launch(
             headless=True,
             args=[
@@ -60,6 +71,9 @@ def run():
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             viewport={"width": 1280, "height": 720}
         )
+
+        # 隐藏自动化控制指纹
+        context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
         try:
             raw_data = json.loads(ICEHOST_COOKIES)
@@ -112,8 +126,20 @@ def run():
 
         page = context.new_page()
 
-        # ⚡ 核心修改：向页面注入高精防检测混淆（让 Cloudflare 的人机验证在后台自动通过）
-        stealth_sync(page)
+        # ⚡ 核心修改：向页面注入高精防检测混淆（智能判断库的版本并执行注入）
+        if _USE_STEALTH_CLASS is True:
+            try:
+                stealth = Stealth()
+                stealth.apply_stealth_sync(page)
+                print("✓ 成功应用新版 playwright-stealth 混淆指纹！")
+            except Exception as se:
+                print(f"应用新版 stealth 失败，跳过: {se}")
+        elif _USE_STEALTH_CLASS is False:
+            try:
+                stealth_sync(page)
+                print("✓ 成功应用旧版 playwright-stealth 混淆指纹！")
+            except Exception as se:
+                print(f"应用旧版 stealth 失败，跳过: {se}")
 
         # 全局网络流量拦截与指纹清洗
         def handle_route(route):
@@ -141,7 +167,7 @@ def run():
             browser.close()
             return
 
-        # 3. 核心探测：高精度多重波兰语关键词探测
+        # 3. 检测是否已经达到了 6 小时限制（波兰语特征词）
         keywords = ["Nie możesz przedłużyć", "niedawno to zrobiłeś", "kolejne 6 godziny"]
         is_limited = False
         
