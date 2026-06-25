@@ -2,9 +2,8 @@ name: IceHost Hourly KeepAlive
 
 on:
   schedule:
-    # ⏱️ 核心魔改：这是 GitHub 内置的全自动闹钟
-    # 每 4 小时全自动触发运行一次，彻底抛弃第三方网站！
-    - cron: '0 */4 * * *'
+    # ⏱️ 终极魔改：每 2 小时运行一次，且在每小时的第 25 分钟发射（避开整点排队高峰）
+    - cron: '25 */2 * * *'
   workflow_dispatch: # 由外部定时（如 cron-job.org）进行每小时触发
 
 jobs:
