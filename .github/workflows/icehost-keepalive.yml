@@ -2,6 +2,8 @@ name: IceHost Hourly KeepAlive
 
 on:
   workflow_dispatch:  # 👈 纯粹的定点打击接口，允许网页手动点击，也允许老版 CF 精准点名
+  schedule:
+    - cron: '17 */3 * * *'   # 每 3 小时执行一次 (UTC)
 
 jobs:
   check-and-start:
