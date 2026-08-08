@@ -3,11 +3,11 @@ import time
 import json
 import urllib.parse
 import requests
-# 引入 SeleniumBase 高级过盾包
 from seleniumbase import SB
 
 SERVER_URL = os.getenv("ICEHOST_SERVER_URL")
 ICEHOST_COOKIES = os.getenv("ICEHOST_COOKIES")
+
 
 def send_tg_notification(message, photo_path=None):
     """发送结果和截图至 Telegram"""
@@ -40,25 +40,28 @@ def send_tg_notification(message, photo_path=None):
         except Exception as e:
             print(f"发送 TG 截图异常: {e}")
 
+
 def run():
     if not SERVER_URL:
-        print("错误: 缺少 ICEHOST_SERVER_URL 环境变量")
+        msg = "❌ <b>IceHost 续期失败！</b>\n未配置 ICEHOST_SERVER_URL 环境变量，脚本无法运行。"
+        print(msg)
+        send_tg_notification(msg)
         return
 
-    # 1. 启动 SeleniumBase 并开启 UC 免密/防检测模式与 Xvfb 虚拟桌面 (xvfb=True)
+    # 1. 启动 SeleniumBase 并开启 UC 免密/防检测模式与 Xvfb 虚拟桌面
     with SB(uc=True, xvfb=True) as sb:
         print(f"正在访问 IceHost 面板: {SERVER_URL}")
         # 使用 UC 专属重连模式访问，能极大缓解首屏 Cloudflare 阻断
         sb.uc_open_with_reconnect(SERVER_URL, reconnect_time=8)
         sb.sleep(5)
 
-        # 2. 注入 Cookies（已升级：智能兼容 JSON 或纯文本格式）
+        # 2. 注入 Cookies（智能兼容 JSON 或纯文本格式）
         if ICEHOST_COOKIES:
             try:
                 cookies_to_add = []
                 raw_cookies_str = ICEHOST_COOKIES.strip()
 
-                # 尝试一：如果 Secret 填的是标准的 JSON 格式
+                # 尝试一：标准 JSON 格式
                 try:
                     raw_data = json.loads(raw_cookies_str)
                     if isinstance(raw_data, list):
@@ -66,31 +69,29 @@ def run():
                     elif isinstance(raw_data, dict):
                         cookies_to_add = raw_data.get("cookies", [])
                     print("检测到 JSON 格式 Cookie，正在解析...")
-                
-                # 尝试二：如果解析失败，说明填的是纯文本
+
+                # 尝试二：纯文本格式
                 except json.JSONDecodeError:
-                    print("检测到纯文本 Cookie 格式，正在自动提取并生成标准字段...")
-                    
-                    # 提取真正的 Token 字符串值
+                    print("检测到纯文本 Cookie 格式，正在自动提取...")
+
                     token_value = raw_cookies_str
                     if "icehostpl_session=" in token_value:
                         token_value = token_value.split("icehostpl_session=")[1].split(";")[0]
                     elif "XSRF-TOKEN=" in token_value:
                         token_value = token_value.split("XSRF-TOKEN=")[1].split(";")[0]
-                    
+
                     token_value = token_value.strip()
 
-                    # 最稳妥策略：自动为 Selenium 生成两个核心的 Cookie 字典
                     cookies_to_add = [
                         {"name": "icehostpl_session", "value": token_value, "domain": "dash.icehost.pl"},
                         {"name": "XSRF-TOKEN", "value": token_value, "domain": "dash.icehost.pl"}
                     ]
 
-                # 统一执行转换与注入
+                # 统一注入
                 for c in cookies_to_add:
                     raw_value = c["value"]
                     decoded_value = urllib.parse.unquote(raw_value)
-                    
+
                     cookie_dict = {
                         "name": c["name"],
                         "value": decoded_value,
@@ -102,91 +103,107 @@ def run():
                         ss = str(c["sameSite"]).lower()
                         if ss in ["lax", "strict", "none"]:
                             cookie_dict["sameSite"] = ss.capitalize()
-                    
+
                     sb.add_cookie(cookie_dict)
-                
+
                 print("Cookie 成功注入！")
-                
-                # 重新刷新加载，应用 Cookie
                 sb.refresh()
                 sb.sleep(5)
-            except Exception as e:
-                print(f"注入 Cookie 过程中发生异常，跳过: {e}")
 
-        # 3. 核心过盾：自动寻找并执行系统级物理点击过 Cloudflare Turnstile 验证盾
+            except Exception as e:
+                err_msg = f"⚠️ <b>IceHost Cookie 注入失败！</b>\n{e}"
+                print(f"注入 Cookie 异常: {e}")
+                send_tg_notification(err_msg, "icehost_debug_screenshot.png")
+                return  # 🔧 Cookie 挂了没法继续，发通知后退出
+
+        else:
+            # 没有配 Cookie，也发通知
+            msg = "⚠️ <b>IceHost 未配置 Cookie！</b>\nICEHOST_COOKIES 环境变量为空，无法登录面板。"
+            print(msg)
+            send_tg_notification(msg)
+            return
+
+        # 3. 核心过盾：物理点击 Cloudflare Turnstile 验证
         sb.save_screenshot("icehost_debug_screenshot.png")
         try:
-            print("正在检测并调用系统级 PyAutoGUI 驱动，物理点击 Cloudflare 人机验证码...")
-            # 在虚拟桌面上定位验证框并模拟发送系统硬件级点击事件
+            print("正在检测并调用系统级 PyAutoGUI 驱动，物理点击 Cloudflare 验证码...")
             sb.uc_gui_click_captcha()
-            sb.sleep(10) # 给予 10 秒跳转缓冲
+            sb.sleep(10)
             sb.save_screenshot("icehost_debug_screenshot.png")
         except Exception as e:
             print(f"验证盾已被跳过或点击执行完毕: {e}")
 
         # 4. 判断登录状态
         current_url = sb.get_current_url()
-        # 判断是否停留在登录页
         if "login" in current_url or sb.is_element_visible("input[type='email']"):
-            msg = "❌ <b>IceHost 登录失效！</b>\n请在浏览器重新提取并更新 ICEHOST_COOKIES。"
+            msg = "❌ <b>IceHost 登录失效！</b>\nCookie 可能已过期，请在浏览器重新提取并更新 ICEHOST_COOKIES。"
             print(msg)
             send_tg_notification(msg, "icehost_debug_screenshot.png")
             return
 
-        # 5. 判定波兰语与英语红框限制
+        # 5. 判定红框限制（未到续期时间）
         page_source = sb.get_page_source()
-        # 🟢 修复：增加了英文的报错关键词，防止英文面板误判
-        keywords = ["Nie możesz przedłużyć", "niedawno to zrobiłeś", "kolejne 6 godziny", "cannot extend", "recently", "next 6 hours"]
+        keywords = [
+            "Nie możesz przedłużyć", "niedawno to zrobiłeś", "kolejne 6 godziny",
+            "cannot extend", "recently", "next 6 hours"
+        ]
         is_limited = any(kw in page_source for kw in keywords)
 
         if is_limited:
-            print("检测到红框限制提示：说明未到可续期时间。结束本次运行（不发送 Telegram 提醒）。")
+            msg = "ℹ️ <b>IceHost 暂无可续期</b>\n检测到限制提示，说明今日已续期或未到 6 小时冷却时间，无需操作。"
+            print(msg)
+            send_tg_notification(msg, "icehost_debug_screenshot.png")  # 🔧 之前静默，现在发通知
             return
 
-        # 6. 安全寻找并点击续期按钮
-        # 🟢 修复：同时兼容波兰语 "dodaj 6" 和 英语 "add 6"
-        renew_btn_selector = "//*[not(*) and (contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'dodaj 6') or contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'add 6'))]"
-        
+        # 6. 寻找并点击续期按钮
+        renew_btn_selector = (
+            "//*[not(*) and ("
+            "contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'dodaj 6') or "
+            "contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'add 6')"
+            ")]"
+        )
+
         try:
             print("正在等待续期按钮加载...")
             sb.wait_for_element_visible(renew_btn_selector, timeout=15)
-            print("未检测到限制提示，找到续期按钮，正在点击...")
+            print("找到续期按钮，正在点击...")
             sb.click(renew_btn_selector)
-            
-            # ⚡ 点击后，在不刷新页面的前提下，先等待 5 秒让可能弹出的红框提示充分渲染
+
             sb.sleep(5)
             sb.save_screenshot("icehost_debug_screenshot.png")
-            
-            # 立即读取当前最真实的页面源码（此时若有报错红条，必定还挂在屏幕上）
+
+            # 点击后检查是否弹出限制
             current_source = sb.get_page_source()
             is_failed_due_to_limit = any(kw in current_source for kw in keywords)
-            
+
             if is_failed_due_to_limit:
-                print("点击后，页面立刻弹出了限制提示：说明未到可续期时间。结束本次运行。")
+                msg = "ℹ️ <b>IceHost 点击后被限制</b>\n续期按钮已点击，但页面弹出限制提示，说明暂不可续期。"
+                print(msg)
+                send_tg_notification(msg, "icehost_debug_screenshot.png")  # 🔧 之前静默，现在发通知
                 return
-            
-            print("点击后未检测到报错红条，正在刷新页面确认续期结果...")
+
+            print("点击后未检测到报错，刷新确认结果...")
             sb.refresh()
             sb.sleep(5)
             sb.save_screenshot("icehost_debug_screenshot.png")
-            
+
             updated_source = sb.get_page_source()
             is_now_limited = any(kw in updated_source for kw in keywords)
-            
+
             if is_now_limited:
-                msg = "⚡ <b>IceHost 服务器续期成功！</b>\n服务器已真正成功延长 6 小时有效期。"
+                msg = "✅ <b>IceHost 服务器续期成功！</b>\n服务器已成功延长 6 小时有效期。"
                 print(msg)
                 send_tg_notification(msg, "icehost_debug_screenshot.png")
             else:
                 msg = "ℹ️ <b>IceHost 续期指令已发送</b>\n按钮已点击，请检查下方截图确认是否成功。"
                 print(msg)
                 send_tg_notification(msg, "icehost_debug_screenshot.png")
-                
+
         except Exception as e:
-            # 🟢 修复：加上了 TG 推送，找不到按钮时能在 TG 收到报错截图
-            error_msg = "❌ <b>IceHost 续期异常！</b>\n未找到续期按钮，可能是网页加载失败、被限制或按钮文本有变，请查看截图。"
-            print(f"未在页面中找到可用的续期按钮: {e}")
+            error_msg = f"❌ <b>IceHost 续期异常！</b>\n未找到续期按钮，页面可能已改版或网络异常。\n错误: {e}"
+            print(error_msg)
             send_tg_notification(error_msg, "icehost_debug_screenshot.png")
+
 
 if __name__ == "__main__":
     run()
